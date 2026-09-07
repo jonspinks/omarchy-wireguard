@@ -12,8 +12,8 @@ import qs.Commons
 // NOPASSWD rule; the shell itself runs unprivileged and never calls wg-quick.
 Panel {
   id: root
-  moduleName: "jon.wireguard"
-  ipcTarget: "jon.wireguard"
+  moduleName: "blacksheep.wireguard"
+  ipcTarget: "blacksheep.wireguard"
 
   implicitWidth: button.implicitWidth
   implicitHeight: bar ? bar.barSize : 26

@@ -27,7 +27,7 @@ git clone https://github.com/jonspinks/omarchy-netconfig ~/Projects/omarchy-netc
 omarchy plugin add https://github.com/jonspinks/omarchy-wireguard --enable
 ```
 
-Update later with `omarchy plugin update jon.wireguard`.
+Update later with `omarchy plugin update blacksheep.wireguard`.
 
 ## Design notes
 

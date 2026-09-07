@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "id": "jon.wireguard",
+  "id": "blacksheep.wireguard",
   "name": "WireGuard",
   "version": "1.0.0",
   "author": "Jon",
