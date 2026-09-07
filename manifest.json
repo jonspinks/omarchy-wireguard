@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "jon.wireguard",
+  "name": "WireGuard",
+  "version": "1.0.0",
+  "author": "Jon",
+  "description": "WireGuard tunnel status, live stats, and a connect/disconnect switch",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "WireGuard",
+    "description": "Tunnel state, throughput, handshake age, and manual connect/disconnect.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
