@@ -19,15 +19,26 @@ Panel {
   implicitHeight: bar ? bar.barSize : 26
 
   property var stats: ({})
+  // False until the first stats sample lands, so an empty list is never shown
+  // as "None" just because nothing has been read yet.
+  property bool loaded: false
   property bool busy: false
+  // Why the last privileged action failed, shown under the trusted list. The
+  // usual cause is sudo refusing a verb the installed sudoers rule predates.
+  property string actionError: ""
 
   readonly property bool tunnelUp: stats.up === true
-  // The VPN endpoint is the home network's own public IP, so raising the tunnel
-  // from a trusted SSID asks the router to hairpin its own WAN address. It
-  // cannot, the handshake never lands, and the full-tunnel routes blackhole
-  // everything. Blocked at the UI rather than left to the handshake watchdog,
-  // which only rescues you ~10s after the connection has already dropped.
+  // Trusted networks are where the tunnel stays down -- typically the network
+  // the VPN server itself is on, where raising it asks the router to hairpin
+  // its own public address; most cannot, the handshake never lands, and the
+  // full-tunnel routes blackhole everything. Connecting there is blocked at the
+  // UI rather than left to the handshake watchdog, which only rescues you ~10s
+  // after the connection has already dropped. To connect anyway, remove the
+  // network from the list.
   readonly property bool onTrusted: stats.trusted === true
+  readonly property var trustedList: Array.isArray(stats.trustedList) ? stats.trustedList : []
+  readonly property string ssid: stats.ssid || ""
+  readonly property bool canTrustHere: ssid !== "" && !onTrusted
   // Only the connect direction is barred; disconnecting is always allowed.
   readonly property bool canConnect: !onTrusted
   readonly property bool connected: stats.connected === true
@@ -88,12 +99,18 @@ Panel {
     runToggle(tunnelUp ? "on" : "off")
   }
 
-  function runToggle(action) {
+  // `extra` is only ever the one name `untrust` takes; sudoers grants the other
+  // verbs with no arguments at all.
+  function runToggle(action, extra) {
     if (busy) return
     // Keyboard and IPC reach this too, not just the switch.
     if (!root.canConnect && !root.tunnelUp && (action === "toggle" || action === "on")) return
+    if (action === "trust" && !root.canTrustHere) return
     busy = true
-    toggleProc.command = ["sudo", "-n", "/usr/local/bin/wg-toggle", action]
+    actionError = ""
+    var cmd = ["sudo", "-n", "/usr/local/bin/wg-toggle", action]
+    if (extra !== undefined) cmd.push(String(extra))
+    toggleProc.command = cmd
     toggleProc.running = true
   }
 
@@ -108,6 +125,7 @@ Panel {
       onStreamFinished: {
         try {
           root.stats = JSON.parse(String(text || "{}").trim() || "{}")
+          root.loaded = true
         } catch (e) {
           root.stats = {}
         }
@@ -119,8 +137,16 @@ Panel {
     id: toggleProc
     // wg-toggle waits on a handshake before returning, so give the tunnel a
     // moment to settle before believing the next sample.
-    onExited: {
+    stderr: StdioCollector { id: toggleErr; waitForEnd: true }
+    onExited: function(exitCode) {
       root.busy = false
+      if (exitCode !== 0) {
+        var msg = String(toggleErr.text || "").trim().split("\n").pop()
+        // sudo -n says this when no NOPASSWD rule covers the verb.
+        if (msg.indexOf("password is required") !== -1)
+          msg = "Not permitted. Re-run network/install.sh to update the sudoers rule."
+        root.actionError = msg || ("wg-toggle failed (exit " + exitCode + ")")
+      }
       settleTimer.restart()
     }
   }
@@ -188,6 +214,7 @@ Panel {
         if (t === "r" || t === "R") root.refresh()
         else if (t === "a" || t === "A") root.runToggle("auto")
         else if (t === "c" || t === "C") root.runToggle("toggle")
+        else if (t === "t" || t === "T") root.runToggle("trust")
       }
 
       Column {
@@ -287,7 +314,7 @@ Panel {
 
             Text {
               width: parent.width
-              text: "On Wi-Fi away from home"
+              text: "On Wi-Fi networks you haven't trusted"
               textFormat: Text.PlainText
               elide: Text.ElideRight
               opacity: 0.6
@@ -311,7 +338,7 @@ Panel {
         Text {
           width: parent.width
           visible: root.onTrusted && !root.tunnelUp
-          text: "Off on " + (root.stats.ssid || "this network") + " — the VPN server is here, so connecting would cut your connection."
+          text: "Off on " + (root.ssid || "this network") + " because it's trusted. Remove it below to connect here."
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
           opacity: 0.6
@@ -325,6 +352,94 @@ Panel {
           width: parent.width
           visible: root.faulted && !!root.stats.last
           text: String(root.stats.last || "")
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          color: root.bar ? root.bar.urgent : Color.urgent
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
+        PanelSeparator { width: parent.width }
+
+        PanelSectionHeader {
+          width: parent.width
+          text: "Trusted networks"
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+        }
+
+        Text {
+          width: parent.width
+          visible: root.loaded && root.trustedList.length === 0
+          text: "None. The tunnel comes up on every Wi-Fi network."
+          wrapMode: Text.WordWrap
+          textFormat: Text.PlainText
+          opacity: 0.6
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
+        Repeater {
+          model: root.trustedList
+
+          Item {
+            required property string modelData
+            width: column.width
+            implicitHeight: Math.max(nameText.implicitHeight, removeButton.implicitHeight)
+
+            Text {
+              id: nameText
+              anchors.left: parent.left
+              anchors.right: removeButton.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              text: modelData + (modelData === root.ssid ? "  · connected" : "")
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: root.bar ? root.bar.foreground : Color.foreground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            PanelActionButton {
+              id: removeButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "󰅙"
+              tooltipText: modelData === root.ssid
+                ? "Stop trusting " + modelData + " (the tunnel will try to connect here)"
+                : "Stop trusting " + modelData
+              enabled: !root.busy
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+              hoverColor: root.bar ? root.bar.urgent : Color.urgent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onClicked: root.runToggle("untrust", modelData)
+            }
+          }
+        }
+
+        // Only the network you are on can be added: the privileged helper takes
+        // no name for `trust`, so the panel cannot trust a network you are not on.
+        Button {
+          visible: root.canTrustHere
+          text: "Trust " + root.ssid
+          iconText: "󰒘"
+          bordered: true
+          enabled: !root.busy
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+          fontSize: Style.font.bodySmall
+          iconSize: Style.font.bodySmall
+          horizontalPadding: 8
+          verticalPadding: 3
+          onClicked: root.runToggle("trust")
+        }
+
+        Text {
+          width: parent.width
+          visible: root.actionError !== ""
+          text: root.actionError
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
           color: root.bar ? root.bar.urgent : Color.urgent
