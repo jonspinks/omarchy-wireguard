@@ -43,33 +43,27 @@ Panel {
   readonly property bool canConnect: !onTrusted
   readonly property bool connected: stats.connected === true
   readonly property string mode: stats.mode || "auto"
-  // Asked for but not running, or running with a peer that never answers.
-  readonly property bool faulted: (mode === "on" && !tunnelUp) || (tunnelUp && !connected)
+  // Wanted up but not connected. "Wanted" is forced on, or automatic on a
+  // Wi-Fi network that isn't trusted (the policy raises the tunnel there; with
+  // no Wi-Fi at all, ethernet or no link, it stays down on purpose), or up
+  // already with a peer that never answers. Shown the way the stock widgets
+  // show trouble: the whole icon in the bar's active colour, not a badge.
+  readonly property bool wanted: mode === "on" || tunnelUp
+    || (mode === "auto" && ssid !== "" && !onTrusted)
+  readonly property bool alarming: wanted && !connected
 
   readonly property string statusText: {
     if (connected) return "Connected"
     if (tunnelUp) return "No reply from peer"
-    if (mode === "on") return "Failed to connect"
+    if (wanted) return "Failed to connect"
     return "Not connected"
   }
 
   readonly property string modeText: {
-    if (mode === "on") return "Forced on"
+    if (mode === "on") return "On"
     if (mode === "off") return "Forced off"
     return "Automatic (by Wi-Fi network)"
   }
-
-  // PanelHero renders `detail` as a bordered pill on the title row, and that
-  // pill is the one element the hero does NOT fit inside trailingInset -- a
-  // long string overflows straight under the trailing ToggleSwitch. Keep it to
-  // a badge, and only when the automatic policy has been overridden; the full
-  // wording lives in the stats grid below.
-  readonly property string modeBadge: {
-    if (mode === "on") return "FORCED ON"
-    if (mode === "off") return "FORCED OFF"
-    return ""
-  }
-
   function humanBytes(n) {
     var b = Number(n) || 0
     if (b >= 1073741824) return (b / 1073741824).toFixed(1) + " GiB"
@@ -181,10 +175,10 @@ Panel {
         WireGuardIcon {
           anchors.centerIn: parent
           iconSize: Style.space(11)
-          color: root.bar ? root.bar.barForeground : Color.foreground
-          badgeColor: root.bar ? root.bar.urgent : Color.urgent
+          color: root.alarming
+            ? (root.bar ? root.bar.urgent : Color.urgent)
+            : (root.bar ? root.bar.barForeground : Color.foreground)
           crossed: !root.connected
-          warning: root.faulted
         }
       }
     }
@@ -229,15 +223,14 @@ Panel {
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
           title: "WireGuard"
           meta: root.statusText
-          detail: root.modeBadge
           iconOpacity: root.connected ? 1.0 : 0.5
           iconComponent: Component {
             WireGuardIcon {
               iconSize: Style.font.display
-              color: root.bar ? root.bar.foreground : Color.foreground
-              badgeColor: root.bar ? root.bar.urgent : Color.urgent
+              color: root.alarming
+                ? (root.bar ? root.bar.urgent : Color.urgent)
+                : (root.bar ? root.bar.foreground : Color.foreground)
               crossed: !root.connected
-              warning: root.faulted
             }
           }
           trailingControl: Component {
@@ -260,6 +253,10 @@ Panel {
           columnSpacing: Style.space(14)
           rowSpacing: Style.space(6)
 
+          // Mode first: who decides is the one thing here you might change.
+          InfoLabel { text: "Mode" }
+          InfoValue { text: root.modeText; Layout.fillWidth: true }
+
           InfoLabel { text: "Endpoint" }
           InfoValue { text: root.stats.peer || "—"; Layout.fillWidth: true }
 
@@ -278,8 +275,6 @@ Panel {
           InfoLabel { text: "Network" }
           InfoValue { text: root.stats.ssid || "—"; Layout.fillWidth: true }
 
-          InfoLabel { text: "Mode" }
-          InfoValue { text: root.modeText; Layout.fillWidth: true }
         }
 
         PanelSeparator { width: parent.width }
@@ -350,7 +345,7 @@ Panel {
         Text {
           id: faultText
           width: parent.width
-          visible: root.faulted && !!root.stats.last
+          visible: root.alarming && !!root.stats.last
           text: String(root.stats.last || "")
           wrapMode: Text.WordWrap
           textFormat: Text.PlainText
