@@ -59,13 +59,13 @@ omarchy plugin remove blacksheep.wireguard
 omarchy restart shell
 ```
 
-`--uninstall` brings the tunnel down and removes every file `install.sh` put in
-place. It leaves `/etc/wg-ssid/trusted`, `/etc/wireguard/wg0.conf` and the
+`--uninstall` brings the tunnel down if this widget raised it, and removes
+every file `install.sh` put in place that is still as it installed it. It leaves `/etc/blacksheep.wireguard/trusted`, `/etc/wireguard/wg0.conf` and the
 `wireguard-tools` package, because those are yours; it prints how to remove them.
 
 ## How it works
 
-`90-wireguard-ssid`, a NetworkManager dispatcher script, runs on every network
+`90-blacksheep-wireguard`, a NetworkManager dispatcher script, runs on every network
 change. It decides up or down from the current SSID and hands off to
 `wg-ssid-apply` through a transient `systemd-run` unit: the apply script waits
 up to 10 s for a handshake, and a dispatcher that blocks that long stalls
@@ -80,25 +80,25 @@ arrives still owns its routes and blackholes traffic, so after 10 s with no
 handshake it tears the tunnel back down, including one that was forced on.
 
 `wg-toggle` is the manual override the panel calls (`toggle`, `on`, `off`,
-`auto`), stored in `/var/lib/wg-ssid/override`. A manual choice outranks the
+`auto`), stored in `/var/lib/blacksheep.wireguard/override`. A manual choice outranks the
 Wi-Fi policy in both directions; `auto` hands the decision back.
 
 The panel's **Trusted networks** section lists the networks, removes one with
 its ⊗ button, and **Trust <network>** (key `t`) adds the network you are on.
 Changes apply at once in automatic mode; a forced on or off is left alone. The
-list is `/etc/wg-ssid/trusted`, one SSID per line, and `sudoedit` works too.
+list is `/etc/blacksheep.wireguard/trusted`, one SSID per line, and `sudoedit` works too.
 **An empty list means no network is trusted**, so the tunnel comes up on every
 Wi-Fi network: the safe default for a VPN.
 
 ## Privilege model
 
 The bar runs as you. It reads state from world-readable files
-(`/var/lib/wg-ssid/override`, `/run/wg-ssid/last-result`,
+(`/var/lib/blacksheep.wireguard/override`, `/run/blacksheep.wireguard/last-result`,
 `/sys/class/net/wg0/statistics/`) through `scripts/wireguard-stats`, which runs
 from the plugin folder as a fixed command.
 
 Everything that needs root goes through one `sudoers` drop-in,
-[`system/sudoers.d/99-wg-toggle`](system/sudoers.d/99-wg-toggle), which lists
+[`system/sudoers.d/99-blacksheep-wireguard`](system/sudoers.d/99-blacksheep-wireguard), which lists
 every command with its exact arguments and has **no wildcards**:
 
 - `wg-toggle toggle|on|off|auto` — switch the tunnel.
@@ -110,7 +110,8 @@ every command with its exact arguments and has **no wildcards**:
 - `wg show wg0 latest-handshakes|endpoints|transfer` — read-only status. It
   never prints the private key.
 
-The scripts it grants are installed root-owned in `/usr/local/bin`, never run
+The scripts it grants are installed root-owned in
+`/usr/local/libexec/blacksheep.wireguard`, never run
 from the plugin folder, so nothing you can write is ever run as root. They keep
 their state and locks in root-owned directories, never in a shared temporary
 one. `install.sh` fills in your account name, validates the drop-in with
@@ -120,6 +121,26 @@ sudoers file that does not parse locks sudo out entirely.
 The drop-in is named `99-` because sudo applies the **last** matching rule, so a
 blanket `%wheel ALL=(ALL:ALL) ALL` sorting after it would bring the password
 prompt back.
+
+## What it owns
+
+Everything `install.sh` installs is under a name that belongs to this plugin
+(`blacksheep.wireguard` / `blacksheep-wireguard`), and it records a SHA-256 of every
+file it installs in `/var/lib/blacksheep.wireguard/installed`.
+
+- **Install** replaces a file only if it is absent, is the plugin's own
+  recorded copy unchanged, or is already byte-identical to what it would
+  install. Anything else stops the install before it changes a thing, and
+  names the file.
+- **Uninstall** removes only files that still match their record. A file
+  changed since install is left in place and reported. Without a record it
+  removes nothing: it never guesses from a file name.
+- **The tunnel.** `wg-ssid-apply` records the kernel interface index of the
+  `wg0` it raises. The automatic policy, and `--uninstall`, only take down that
+  `wg0`; a tunnel brought up any other way has a different index and is left
+  alone. Turning the tunnel off in the panel is your explicit choice, so it
+  downs any `wg0`. Don't also enable `wg-quick@wg0.service`: `install.sh
+  --check` warns if it is.
 
 ## License
 

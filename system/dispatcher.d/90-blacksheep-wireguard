@@ -7,14 +7,14 @@
 # Wi-Fi at all (ethernet, or no link) counts as "no tunnel".
 #
 # Install: sudo install -o root -g root -m 0755 \
-#            90-wireguard-ssid /etc/NetworkManager/dispatcher.d/
+#            90-blacksheep-wireguard /etc/NetworkManager/dispatcher.d/
 
 IFACE="$1"
 ACTION="$2"
 
 WG_IF=wg0
-APPLY=/usr/local/bin/wg-ssid-apply
-TRUSTED_FILE=/etc/wg-ssid/trusted
+APPLY=/usr/local/libexec/blacksheep.wireguard/wg-ssid-apply
+TRUSTED_FILE=/etc/blacksheep.wireguard/trusted
 
 # Wi-Fi networks where the tunnel stays down: one SSID per line, written by
 # install.sh and by `wg-toggle trust|untrust` from the bar panel. No
@@ -73,7 +73,7 @@ fi
 # Hand off to a transient unit: the apply script waits up to 10s on a handshake,
 # and a dispatcher script that blocks that long stalls NetworkManager's queue
 # for every other event.
-systemd-run --no-block --unit="wg-ssid-apply-$$" --description="Apply WireGuard SSID policy" \
+systemd-run --no-block --unit="blacksheep-wireguard-apply-$$" --description="Apply WireGuard SSID policy" \
   "$APPLY" "$want" >/dev/null 2>&1
 
 # Never fail: a non-zero exit here just spams the NetworkManager journal.

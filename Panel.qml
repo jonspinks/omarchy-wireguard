@@ -8,7 +8,7 @@ import qs.Commons
 // WireGuard bar widget: an ouroboros in the bar, and a popup with live tunnel
 // stats and a connect/disconnect switch. Modelled on omarchy.network.
 //
-// All privileged work goes through /usr/local/bin/wg-toggle under a scoped
+// All privileged work goes through /usr/local/libexec/blacksheep.wireguard/wg-toggle under a scoped
 // NOPASSWD rule; the shell itself runs unprivileged and never calls wg-quick.
 Panel {
   id: root
@@ -103,7 +103,7 @@ Panel {
     busy = true
     actionError = ""
     toggleProc.input = extra !== undefined ? String(extra) : ""
-    toggleProc.command = ["sudo", "-n", "/usr/local/bin/wg-toggle", action]
+    toggleProc.command = ["sudo", "-n", "/usr/local/libexec/blacksheep.wireguard/wg-toggle", action]
     toggleProc.running = true
   }
 

@@ -13,14 +13,14 @@
 # reads its one name from stdin rather than argv, so the sudoers rule can name
 # every verb exactly, with no wildcard. It can only delete an exact existing
 # entry -- the worst a misuse can do is make the tunnel come up MORE often.
-# Install to /usr/local/bin/wg-toggle, mode 0755, root-owned.
+# Install to /usr/local/libexec/blacksheep.wireguard/wg-toggle, mode 0755, root-owned.
 
 set -u
 
 WG_IF=wg0
-APPLY=/usr/local/bin/wg-ssid-apply
-OVERRIDE_FILE=/var/lib/wg-ssid/override
-TRUSTED_FILE=/etc/wg-ssid/trusted
+APPLY=/usr/local/libexec/blacksheep.wireguard/wg-ssid-apply
+OVERRIDE_FILE=/var/lib/blacksheep.wireguard/override
+TRUSTED_FILE=/etc/blacksheep.wireguard/trusted
 
 # Wi-Fi networks where the tunnel stays down: one SSID per line, written by
 # install.sh and by `wg-toggle trust|untrust` from the bar panel. No

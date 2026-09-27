@@ -10,6 +10,6 @@
 # Named 99- so it sorts last in /etc/sudoers.d: sudo applies the LAST matching
 # rule, so a blanket "%wheel ALL=(ALL:ALL) ALL" in a later-sorting file would
 # otherwise re-impose the password prompt this grant exists to avoid.
-@USER@ ALL=(root) NOPASSWD: /usr/local/bin/wg-toggle toggle, /usr/local/bin/wg-toggle on, /usr/local/bin/wg-toggle off, /usr/local/bin/wg-toggle auto
-@USER@ ALL=(root) NOPASSWD: /usr/local/bin/wg-toggle trust, /usr/local/bin/wg-toggle untrust
+@USER@ ALL=(root) NOPASSWD: /usr/local/libexec/blacksheep.wireguard/wg-toggle toggle, /usr/local/libexec/blacksheep.wireguard/wg-toggle on, /usr/local/libexec/blacksheep.wireguard/wg-toggle off, /usr/local/libexec/blacksheep.wireguard/wg-toggle auto
+@USER@ ALL=(root) NOPASSWD: /usr/local/libexec/blacksheep.wireguard/wg-toggle trust, /usr/local/libexec/blacksheep.wireguard/wg-toggle untrust
 @USER@ ALL=(root) NOPASSWD: /usr/bin/wg show wg0 latest-handshakes, /usr/bin/wg show wg0 endpoints, /usr/bin/wg show wg0 transfer

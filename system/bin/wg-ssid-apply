@@ -4,7 +4,7 @@
 #
 # Called by the NetworkManager dispatcher with the SSID-derived decision, and by
 # wg-toggle when the user overrides it from the bar. Install to
-# /usr/local/bin/wg-ssid-apply, mode 0755, root-owned.
+# /usr/local/libexec/blacksheep.wireguard/wg-ssid-apply, mode 0755, root-owned.
 
 set -u
 
@@ -12,8 +12,8 @@ WG_IF=wg0
 WANT="${1:-down}"
 HANDSHAKE_TIMEOUT=10
 
-OVERRIDE_FILE=/var/lib/wg-ssid/override   # persistent: auto | on | off
-STATE_DIR=/run/wg-ssid                    # ephemeral: last outcome, for the bar
+OVERRIDE_FILE=/var/lib/blacksheep.wireguard/override   # persistent: auto | on | off
+STATE_DIR=/run/blacksheep.wireguard                    # ephemeral: last outcome, for the bar
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 
@@ -40,14 +40,25 @@ note() { printf '%s %s\n' "$(date +%H:%M:%S)" "$1" > "$STATE_DIR/last-result"; }
 tunnel_is_up() { ip link show "$WG_IF" &>/dev/null; }
 last_handshake() { wg show "$WG_IF" latest-handshakes 2>/dev/null | awk 'NR==1 {print $2+0; exit}'; }
 
+# Which wg0 this script raised, by kernel interface index. A tunnel brought up
+# any other way (wg-quick by hand, another tool) gets a different index, so the
+# automatic policy never tears down a tunnel it did not start. Only a forced
+# "off" from the panel -- the user's explicit choice -- downs any wg0.
+RAISED=$STATE_DIR/raised
+ifindex() { cat "/sys/class/net/$WG_IF/ifindex" 2>/dev/null; }
+mark_raised() { ifindex >"$RAISED"; }
+raised_by_us() { [[ -r $RAISED && -n $(ifindex) && $(<"$RAISED") == "$(ifindex)" ]]; }
+take_down() { wg-quick down "$WG_IF" 2>/dev/null; rm -f "$RAISED"; }
+
 case "$WANT" in
 up)
   tunnel_is_up && exit 0
   if ! wg-quick up "$WG_IF" 2>/dev/null; then
     note "failed to start"
-    logger -t wg-ssid "wg-quick up $WG_IF failed"
+    logger -t blacksheep-wireguard "wg-quick up $WG_IF failed"
     exit 0
   fi
+  mark_raised
 
   # A tunnel whose handshake never lands still owns its routes, which blackholes
   # traffic. Tear it back down rather than leave the machine with no path out --
@@ -55,20 +66,25 @@ up)
   for ((i = 0; i < HANDSHAKE_TIMEOUT; i++)); do
     if (($(last_handshake) > 0)); then
       note "connected"
-      logger -t wg-ssid "handshake ok on $WG_IF"
+      logger -t blacksheep-wireguard "handshake ok on $WG_IF"
       exit 0
     fi
     sleep 1
   done
 
   note "no handshake"
-  logger -t wg-ssid "no handshake on $WG_IF after ${HANDSHAKE_TIMEOUT}s; tearing down to preserve connectivity"
-  wg-quick down "$WG_IF" 2>/dev/null
+  logger -t blacksheep-wireguard "no handshake on $WG_IF after ${HANDSHAKE_TIMEOUT}s; tearing down to preserve connectivity"
+  take_down
   ;;
 down)
-  if tunnel_is_up; then
-    wg-quick down "$WG_IF" 2>/dev/null
+  if ! tunnel_is_up; then
+    rm -f "$RAISED"
+  elif [[ $override == off ]] || raised_by_us; then
+    take_down
     note "stopped"
+  else
+    note "up, but not started by this widget; left alone"
+    logger -t blacksheep-wireguard "$WG_IF is up but was not raised by this widget; not taking it down"
   fi
   ;;
 esac

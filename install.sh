@@ -3,19 +3,27 @@
 #
 #   ./install.sh              install or update it
 #   ./install.sh --check      report what is in place, change nothing
-#   ./install.sh --uninstall  remove everything this script installed
+#   ./install.sh --uninstall  remove what this script installed, and nothing else
 #
 # Run it as your normal user from the plugin folder
 # (~/.config/omarchy/plugins/blacksheep.wireguard); it calls sudo where it
 # needs to. Re-run it after `omarchy plugin update`, because the root-owned
-# copies in /usr/local/bin do not update themselves.
+# copies do not update themselves.
 #
-# What it installs, all root-owned:
-#   /usr/local/bin/wg-toggle, wg-ssid-apply          0755
-#   /etc/NetworkManager/dispatcher.d/90-wireguard-ssid 0755
-#   /etc/sudoers.d/99-wg-toggle                      0440, checked by visudo
-#   /etc/wg-ssid/trusted                             0644, the networks you enter
-#   /var/lib/wg-ssid/override                        0644, auto|on|off
+# Everything it installs is under a name that belongs to this plugin:
+#   /usr/local/libexec/blacksheep.wireguard/wg-toggle, wg-ssid-apply   0755
+#   /etc/NetworkManager/dispatcher.d/90-blacksheep-wireguard           0755
+#   /etc/sudoers.d/99-blacksheep-wireguard                             0440, checked by visudo
+#   /etc/blacksheep.wireguard/trusted     0644, only if absent: the networks you enter
+#   /var/lib/blacksheep.wireguard/        0755: the override, and the ownership record
+#
+# OWNERSHIP. The installer records a SHA-256 of every file it installs in
+# /var/lib/blacksheep.wireguard/installed. It replaces a file only if the file
+# is absent, is its own recorded copy unchanged, or is already byte-identical
+# to what it would install; anything else stops the install before it changes
+# a thing. --uninstall removes only files that still match their record, and
+# leaves anything changed since in place. It never guesses from a file name.
+#
 # It never writes /etc/wireguard/wg0.conf: that holds your private key, and you
 # install it yourself (system/examples/wg0.conf.example shows the shape).
 
@@ -40,10 +48,15 @@ fi
 # The account name goes into a sudoers rule, so it must be a plain name.
 [[ $USER =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "unexpected user name: $USER" >&2; exit 1; }
 
-SCRIPTS=(wg-toggle wg-ssid-apply)
-DISPATCH=90-wireguard-ssid
-SUDOERS=99-wg-toggle
-TRUSTED_FILE=/etc/wg-ssid/trusted
+NS=blacksheep.wireguard
+LIBEXEC=/usr/local/libexec/$NS
+ETC=/etc/$NS
+VAR=/var/lib/$NS
+RUN=/run/$NS
+RECORD=$VAR/installed
+TRUSTED_FILE=$ETC/trusted
+DISPATCH=/etc/NetworkManager/dispatcher.d/90-blacksheep-wireguard
+SUDOERS=/etc/sudoers.d/99-blacksheep-wireguard
 VERBS=("wg-toggle toggle" "wg-toggle on" "wg-toggle off" "wg-toggle auto"
   "wg-toggle trust" "wg-toggle untrust")
 
@@ -59,7 +72,7 @@ check_verbs() {
   local verb
   for verb in "${VERBS[@]}"; do
     # shellcheck disable=SC2086
-    if sudo -n -l -l /usr/local/bin/$verb 2>/dev/null | grep -q '!authenticate'; then
+    if sudo -n -l -l $LIBEXEC/$verb 2>/dev/null | grep -q '!authenticate'; then
       ok "sudo -n $verb"
     else
       bad "sudo -n $verb"
@@ -67,17 +80,85 @@ check_verbs() {
   done
 }
 
+# ---------------------------------------------------------- ownership record
+
+# One "sha256  path" line per installed file. The record is root-owned and
+# world-readable; only root can change it.
+declare -A OWNED=()
+load_record() {
+  local sum path
+  [[ -r $RECORD ]] || return 0
+  while read -r sum path; do
+    [[ -n $path ]] && OWNED[$path]=$sum
+  done <"$RECORD"
+}
+# Most targets are world-readable; the sudoers drop-in is 0440, so it takes sudo.
+sum_of() {
+  { sha256sum "$1" 2>/dev/null || sudo sha256sum "$1" 2>/dev/null; } | cut -d' ' -f1
+}
+
+# The files this install would place: "source|target|mode". The sudoers source
+# is generated for this account, so it is staged in a temporary file first.
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+sed "s/@USER@/$USER/g" system/sudoers.d/99-blacksheep-wireguard >"$STAGE/sudoers"
+PLAN=(
+  "system/bin/wg-toggle|$LIBEXEC/wg-toggle|0755"
+  "system/bin/wg-ssid-apply|$LIBEXEC/wg-ssid-apply|0755"
+  "system/dispatcher.d/90-blacksheep-wireguard|$DISPATCH|0755"
+  "$STAGE/sudoers|$SUDOERS|0440"
+)
+
+# Stop before changing anything if a target is somebody else's.
+preflight() {
+  local entry src target mode have conflicts=0
+  for entry in "${PLAN[@]}"; do
+    IFS='|' read -r src target mode <<<"$entry"
+    sudo test -e "$target" || continue
+    have=$(sum_of "$target")
+    [[ $have == "$(sha256sum "$src" | cut -d' ' -f1)" ]] && continue
+    [[ -n ${OWNED[$target]:-} && $have == "${OWNED[$target]}" ]] && continue
+    echo "  STOP $target exists and was not installed by this plugin (or has changed since)"
+    conflicts=1
+  done
+  if ((conflicts)); then
+    echo
+    echo "Nothing was changed. Move the files above aside yourself if they are safe" >&2
+    echo "to replace, then run install.sh again." >&2
+    exit 1
+  fi
+}
+
+write_record() {
+  local path
+  for path in "${!OWNED[@]}"; do
+    printf '%s  %s\n' "${OWNED[$path]}" "$path"
+  done | sort -k2 >"$STAGE/record"
+  sudo install -o root -g root -m 0644 "$STAGE/record" "$RECORD"
+}
+
 # ---------------------------------------------------------------- check mode
 
 if [[ $MODE == check ]]; then
-  echo "==> Scripts"
-  for f in "${SCRIPTS[@]}"; do
-    [[ -x /usr/local/bin/$f ]] && ok "/usr/local/bin/$f" || bad "/usr/local/bin/$f missing"
-    [[ -x /usr/local/bin/$f ]] && ! cmp -s "system/bin/$f" "/usr/local/bin/$f" &&
-      bad "/usr/local/bin/$f differs from this plugin's copy — re-run install.sh"
+  load_record
+  echo "==> Installed files"
+  if ((${#OWNED[@]} == 0)); then
+    bad "no ownership record at $RECORD — not installed (or check needs a password)"
+  fi
+  for entry in "${PLAN[@]}"; do
+    IFS='|' read -r src target mode <<<"$entry"
+    # /etc/sudoers.d can't be read without a password; the verbs below prove
+    # the rule is in place instead.
+    if [[ $target == "$SUDOERS" ]]; then
+      echo "  --   $target (checked through the passwordless verbs below)"
+    elif [[ ! -e $target ]]; then
+      bad "$target missing"
+    elif [[ $(sum_of "$target") != "$(sha256sum "$src" | cut -d' ' -f1)" ]]; then
+      bad "$target differs from this plugin's copy — re-run install.sh"
+    else
+      ok "$target"
+    fi
   done
-  echo "==> Dispatcher"
-  [[ -x /etc/NetworkManager/dispatcher.d/$DISPATCH ]] && ok "$DISPATCH" || bad "$DISPATCH missing"
   echo "==> Trusted Wi-Fi"
   if [[ -r $TRUSTED_FILE ]]; then
     n=$(trusted_count)
@@ -86,7 +167,7 @@ if [[ $MODE == check ]]; then
   else
     bad "$TRUSTED_FILE missing: the tunnel comes up on every Wi-Fi network"
   fi
-  echo "==> Tunnel config"
+  echo "==> Tunnel"
   # /etc/wireguard is 0700 root, so an unprivileged test cannot tell "absent"
   # from "unreadable". Say so rather than report a key that is really there.
   if sudo -n test -f /etc/wireguard/wg0.conf 2>/dev/null; then
@@ -94,6 +175,9 @@ if [[ $MODE == check ]]; then
   else
     echo "  ?    /etc/wireguard/wg0.conf — cannot tell without a password; check with:"
     echo "         sudo test -f /etc/wireguard/wg0.conf && echo present"
+  fi
+  if systemctl is-enabled --quiet wg-quick@wg0.service 2>/dev/null; then
+    bad "wg-quick@wg0.service is enabled: it and this widget would both manage wg0"
   fi
   echo "==> Passwordless verbs"
   check_verbs
@@ -103,19 +187,42 @@ fi
 # ------------------------------------------------------------ uninstall mode
 
 if [[ $MODE == uninstall ]]; then
-  echo "==> Bringing the tunnel down"
-  sudo wg-quick down wg0 2>/dev/null && ok "wg0 down" || ok "wg0 was not up"
-  echo "==> Removing"
-  sudo rm -f "/etc/sudoers.d/$SUDOERS" && ok "/etc/sudoers.d/$SUDOERS"
-  sudo rm -f "/etc/NetworkManager/dispatcher.d/$DISPATCH" && ok "$DISPATCH"
-  for f in "${SCRIPTS[@]}"; do
-    sudo rm -f "/usr/local/bin/$f" && ok "/usr/local/bin/$f"
+  load_record
+  if ((${#OWNED[@]} == 0)); then
+    echo "No ownership record at $RECORD, so there is nothing this script knows it"
+    echo "installed. Nothing was removed."
+    exit 0
+  fi
+  echo "==> The tunnel"
+  # Only a wg0 this widget raised: wg-ssid-apply records its interface index,
+  # and a tunnel started any other way has a different one.
+  if ! ip link show wg0 &>/dev/null; then
+    ok "wg0 is not up"
+  elif [[ -r $RUN/raised && $(cat /sys/class/net/wg0/ifindex 2>/dev/null) == "$(cat "$RUN/raised")" ]]; then
+    sudo wg-quick down wg0 2>/dev/null && ok "wg0 down"
+  else
+    echo "  KEEP wg0 is up but was not started by this widget; left up"
+  fi
+  echo "==> Removing what this plugin installed"
+  # The sudoers rule goes first, so the grant never outlives the scripts it names.
+  for path in "$SUDOERS" $(printf '%s\n' "${!OWNED[@]}" | grep -vxF "$SUDOERS" | sort); do
+    [[ -n ${OWNED[$path]:-} ]] || continue
+    if ! sudo test -e "$path"; then
+      ok "$path (already gone)"
+    elif [[ $(sum_of "$path") == "${OWNED[$path]}" ]]; then
+      sudo rm -f "$path" && ok "removed $path"
+    else
+      echo "  KEEP $path has changed since install; left in place"
+    fi
   done
-  sudo rm -rf /var/lib/wg-ssid /run/wg-ssid && ok "state"
-  cat <<'LEFT'
+  sudo rmdir "$LIBEXEC" 2>/dev/null || true
+  # State: only the files this plugin writes, inside its own directories.
+  sudo rm -f "$VAR/override" "$RECORD" "$RUN/last-result" "$RUN/apply.lock" "$RUN/raised" "$ETC/.lock"
+  sudo rmdir "$VAR" "$RUN" 2>/dev/null || true
+  cat <<LEFT
 
 Left in place, because they are yours rather than this plugin's:
-  /etc/wg-ssid/trusted        your trusted networks   (sudo rm -r /etc/wg-ssid)
+  $TRUSTED_FILE     your trusted networks   (sudo rm -r $ETC)
   /etc/wireguard/wg0.conf     your tunnel and its key
   the wireguard-tools package
 
@@ -125,20 +232,30 @@ LEFT
   exit 0
 fi
 
-# ------------------------------------------------------------------ packages
+# -------------------------------------------------------------- install mode
+
+load_record
+echo "==> Checking for files this plugin doesn't own"
+preflight
+ok "no conflicts"
+
+if systemctl is-enabled --quiet wg-quick@wg0.service 2>/dev/null; then
+  echo "  WARN wg-quick@wg0.service is enabled. It and this widget would both manage"
+  echo "       wg0; disable it (sudo systemctl disable wg-quick@wg0) if this widget"
+  echo "       should decide when the tunnel is up."
+fi
 
 echo "==> Packages"
 omarchy pkg add wireguard-tools 2>/dev/null ||
   sudo pacman -S --needed --noconfirm wireguard-tools
 ok "wireguard-tools"
 
-# ----------------------------------------------------------- trusted Wi-Fi
-
 # Written before the dispatcher is installed, so the policy never runs against a
 # missing list. Nothing is built in: with no trusted networks the tunnel comes up
-# on every Wi-Fi network, which is the safe default for a VPN.
+# on every Wi-Fi network, which is the safe default for a VPN. It is your data,
+# so it is written only if absent and never removed.
 echo "==> Trusted Wi-Fi networks (the tunnel stays down on these)"
-if [[ -f $TRUSTED_FILE ]]; then
+if sudo test -f "$TRUSTED_FILE"; then
   ok "$TRUSTED_FILE already present: $(trusted_count) network(s)"
   echo "       manage them from the panel, or: sudoedit $TRUSTED_FILE"
 else
@@ -150,10 +267,8 @@ else
   while read -rp "  Trusted SSID (blank when done): " name && [[ -n $name ]]; do
     names+=("$name")
   done
-  tmp=$(mktemp)
-  { cat system/examples/wg-ssid-trusted; printf '%s\n' "${names[@]}"; } >"$tmp"
-  sudo install -D -o root -g root -m 0644 "$tmp" "$TRUSTED_FILE"
-  rm -f "$tmp"
+  { cat system/examples/trusted; printf '%s\n' "${names[@]}"; } >"$STAGE/trusted"
+  sudo install -D -o root -g root -m 0644 "$STAGE/trusted" "$TRUSTED_FILE"
   if ((${#names[@]})); then
     ok "$TRUSTED_FILE: ${#names[@]} network(s)"
   else
@@ -162,46 +277,37 @@ else
   fi
 fi
 
-# ------------------------------------------------------------------- scripts
-
-echo "==> Scripts"
-for f in "${SCRIPTS[@]}"; do
-  sudo install -o root -g root -m 0755 "system/bin/$f" "/usr/local/bin/$f"
-  ok "/usr/local/bin/$f"
-done
-sudo install -o root -g root -m 0755 "system/dispatcher.d/$DISPATCH" \
-  "/etc/NetworkManager/dispatcher.d/$DISPATCH"
-ok "/etc/NetworkManager/dispatcher.d/$DISPATCH"
-
-# ------------------------------------------------------------------- sudoers
-
 # Never install a sudoers file that does not parse: a broken drop-in locks sudo
 # out entirely, and there is no second chance on a machine with no root shell.
-echo "==> Sudoers rule for '$USER'"
-tmp=$(mktemp)
-sed "s/@USER@/$USER/g" "system/sudoers.d/$SUDOERS" >"$tmp"
-sudo install -o root -g root -m 0440 "$tmp" "/etc/sudoers.d/.$SUDOERS.new"
-rm -f "$tmp"
-if sudo visudo -c -f "/etc/sudoers.d/.$SUDOERS.new" >/dev/null; then
-  sudo mv "/etc/sudoers.d/.$SUDOERS.new" "/etc/sudoers.d/$SUDOERS"
-  ok "/etc/sudoers.d/$SUDOERS"
-else
-  sudo rm -f "/etc/sudoers.d/.$SUDOERS.new"
-  echo "sudoers rule failed validation; nothing installed" >&2
-  exit 1
-fi
+# `visudo -c -f` checks the staged copy before anything is placed.
+echo "==> Checking the sudoers rule for '$USER'"
+sudo visudo -c -f "$STAGE/sudoers" >/dev/null || { echo "sudoers rule failed validation; nothing installed" >&2; exit 1; }
+ok "parses"
 
-# --------------------------------------------------------------------- state
+echo "==> Installing"
+sudo install -d -o root -g root -m 0755 "$LIBEXEC" "$VAR"
+for entry in "${PLAN[@]}"; do
+  IFS='|' read -r src target mode <<<"$entry"
+  # Into place through a dot-named temporary in the same directory: sudo skips
+  # dot files in sudoers.d, and the rename is atomic for every other reader.
+  tmp="$(dirname "$target")/.$(basename "$target").new"
+  sudo install -o root -g root -m "$mode" "$src" "$tmp"
+  if [[ $target == "$SUDOERS" ]] && ! sudo visudo -c -f "$tmp" >/dev/null; then
+    sudo rm -f "$tmp"
+    echo "sudoers rule failed validation in place; not installed" >&2
+    exit 1
+  fi
+  sudo mv -f "$tmp" "$target"
+  OWNED[$target]=$(sha256sum "$src" | cut -d' ' -f1)
+  write_record
+  ok "$target"
+done
 
 echo "==> State"
 # World-readable: the bar runs unprivileged and reads it to draw the widget.
-sudo install -d -o root -g root -m 0755 /var/lib/wg-ssid
-[[ -f /var/lib/wg-ssid/override ]] ||
-  echo auto | sudo tee /var/lib/wg-ssid/override >/dev/null
-sudo chmod 0644 /var/lib/wg-ssid/override
-ok "/var/lib/wg-ssid/override: $(cat /var/lib/wg-ssid/override)"
-
-# ------------------------------------------------------------------ the key
+sudo test -f "$VAR/override" || echo auto | sudo tee "$VAR/override" >/dev/null
+sudo chmod 0644 "$VAR/override"
+ok "$VAR/override: $(cat "$VAR/override")"
 
 echo "==> Tunnel config"
 if sudo test -f /etc/wireguard/wg0.conf; then
@@ -212,8 +318,6 @@ else
   echo "    sudo install -o root -g root -m 0600 wg0.conf /etc/wireguard/wg0.conf"
 fi
 
-# ------------------------------------------------------------------ checking
-
 echo
 echo "==> Checking"
 check_verbs
@@ -222,8 +326,8 @@ echo "  wireguard-stats: $(scripts/wireguard-stats)"
 cat <<'NEXT'
 
 If any verb above says FAIL, look at what else is in /etc/sudoers.d: sudo
-applies the LAST matching rule, so a file that sorts after 99-wg-toggle and
-grants the same commands with a password wins over this one.
+applies the LAST matching rule, so a file that sorts after
+99-blacksheep-wireguard and grants the same commands with a password wins.
 
 If the widget is not on the bar yet:
   omarchy plugin enable blacksheep.wireguard

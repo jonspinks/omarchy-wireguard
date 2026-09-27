@@ -1,6 +1,6 @@
 # Wi-Fi networks where the WireGuard tunnel stays DOWN.
-# Installed to /etc/wg-ssid/trusted (root:root 0644); edit with
-#   sudoedit /etc/wg-ssid/trusted
+# Installed to /etc/blacksheep.wireguard/trusted (root:root 0644); edit with
+#   sudoedit /etc/blacksheep.wireguard/trusted
 #
 # One SSID per line, matched exactly (case-sensitive). Blank lines and lines
 # starting with # are ignored, and surrounding whitespace is trimmed.
