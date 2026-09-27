@@ -96,6 +96,16 @@ load_record() {
 sum_of() {
   { sha256sum "$1" 2>/dev/null || sudo sha256sum "$1" 2>/dev/null; } | cut -d' ' -f1
 }
+# `test -e` follows symlinks, so a dangling link would read as absent. Every
+# check here asks about the path itself: a symlink is never ours, whatever it
+# points at, and is never followed, replaced or removed.
+is_link() { sudo test -L "$1"; }
+present() { sudo test -e "$1" || sudo test -L "$1"; }
+
+# This plugin's own directories must be real, root-owned directories, and the
+# files it writes only when absent (or rewrites in place) must not be links.
+DIRS=("$LIBEXEC" "$VAR" "$RUN" "$ETC")
+NOLINK=("$RECORD" "$VAR/override" "$TRUSTED_FILE")
 
 # The files this install would place: "source|target|mode". The sudoers source
 # is generated for this account, so it is staged in a temporary file first.
@@ -111,10 +121,30 @@ PLAN=(
 
 # Stop before changing anything if a target is somebody else's.
 preflight() {
-  local entry src target mode have conflicts=0
+  local entry src target mode have d f conflicts=0
+  for d in "${DIRS[@]}"; do
+    if is_link "$d"; then
+      echo "  STOP $d is a symbolic link"; conflicts=1
+    elif sudo test -e "$d" && [[ $(sudo stat -c '%F %U' "$d") != "directory root" ]]; then
+      echo "  STOP $d exists and is not a root-owned directory"; conflicts=1
+    fi
+  done
+  for f in "${NOLINK[@]}"; do
+    if is_link "$f"; then
+      echo "  STOP $f is a symbolic link"; conflicts=1
+    elif sudo test -d "$f"; then
+      echo "  STOP $f is a directory"; conflicts=1
+    fi
+  done
   for entry in "${PLAN[@]}"; do
     IFS='|' read -r src target mode <<<"$entry"
-    sudo test -e "$target" || continue
+    if is_link "$target"; then
+      echo "  STOP $target is a symbolic link"; conflicts=1; continue
+    fi
+    present "$target" || continue
+    if sudo test -d "$target"; then
+      echo "  STOP $target is a directory"; conflicts=1; continue
+    fi
     have=$(sum_of "$target")
     [[ $have == "$(sha256sum "$src" | cut -d' ' -f1)" ]] && continue
     [[ -n ${OWNED[$target]:-} && $have == "${OWNED[$target]}" ]] && continue
@@ -151,6 +181,8 @@ if [[ $MODE == check ]]; then
     # the rule is in place instead.
     if [[ $target == "$SUDOERS" ]]; then
       echo "  --   $target (checked through the passwordless verbs below)"
+    elif [[ -L $target ]]; then
+      bad "$target is a symbolic link, not this plugin's file"
     elif [[ ! -e $target ]]; then
       bad "$target missing"
     elif [[ $(sum_of "$target") != "$(sha256sum "$src" | cut -d' ' -f1)" ]]; then
@@ -207,7 +239,9 @@ if [[ $MODE == uninstall ]]; then
   # The sudoers rule goes first, so the grant never outlives the scripts it names.
   for path in "$SUDOERS" $(printf '%s\n' "${!OWNED[@]}" | grep -vxF "$SUDOERS" | sort); do
     [[ -n ${OWNED[$path]:-} ]] || continue
-    if ! sudo test -e "$path"; then
+    if is_link "$path"; then
+      echo "  KEEP $path is a symbolic link, not what this plugin installed; left in place"
+    elif ! present "$path"; then
       ok "$path (already gone)"
     elif [[ $(sum_of "$path") == "${OWNED[$path]}" ]]; then
       sudo rm -f "$path" && ok "removed $path"
@@ -290,14 +324,14 @@ for entry in "${PLAN[@]}"; do
   IFS='|' read -r src target mode <<<"$entry"
   # Into place through a dot-named temporary in the same directory: sudo skips
   # dot files in sudoers.d, and the rename is atomic for every other reader.
-  tmp="$(dirname "$target")/.$(basename "$target").new"
+  tmp=$(sudo mktemp -p "$(dirname "$target")" ".$(basename "$target").XXXXXX")
   sudo install -o root -g root -m "$mode" "$src" "$tmp"
   if [[ $target == "$SUDOERS" ]] && ! sudo visudo -c -f "$tmp" >/dev/null; then
     sudo rm -f "$tmp"
     echo "sudoers rule failed validation in place; not installed" >&2
     exit 1
   fi
-  sudo mv -f "$tmp" "$target"
+  sudo mv -f -T "$tmp" "$target"
   OWNED[$target]=$(sha256sum "$src" | cut -d' ' -f1)
   write_record
   ok "$target"
