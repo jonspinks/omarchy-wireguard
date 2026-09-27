@@ -1,0 +1,104 @@
+#!/bin/bash
+# Emit WireGuard tunnel state as a single JSON object for the bar plugin.
+#
+# Unprivileged: the shell runs as the user and `wg show` needs CAP_NET_ADMIN,
+# so interface state and counters come from /sys and `wg show` only enriches
+# the output when it happens to be permitted.
+
+WG_IF=wg0
+SYS=/sys/class/net/$WG_IF
+OVERRIDE_FILE=/var/lib/wg-ssid/override
+LAST_RESULT=/run/wg-ssid/last-result
+
+TRUSTED_FILE=/etc/wg-ssid/trusted
+
+# Wi-Fi networks where the tunnel stays down: one SSID per line, written by
+# install.sh and by `wg-toggle trust|untrust` from the bar panel. No
+# file, or no names in it, means no network is trusted and the tunnel comes up
+# on every Wi-Fi network. Lines are trimmed and CRLF-safe so a stray space or a
+# file edited on Windows cannot silently untrust a network.
+# Keep this block identical in the dispatcher, wg-toggle and wireguard-stats.
+trusted_ssids() {
+  local line
+  [[ -r $TRUSTED_FILE ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [[ -z $line || $line == \#* ]] && continue
+    printf '%s\n' "$line"
+  done <"$TRUSTED_FILE"
+}
+
+is_trusted() {
+  local ssid=$1 line
+  [[ -n $ssid ]] || return 1
+  while IFS= read -r line; do
+    [[ $ssid == "$line" ]] && return 0
+  done < <(trusted_ssids)
+  return 1
+}
+
+# The SSID of the active Wi-Fi connection, empty when not on Wi-Fi. `-e no`
+# stops nmcli escaping ':' and '\' in the name, so an SSID containing either
+# still matches the list; only the first ':' separates the fields. `--rescan no`
+# reads the cached scan: the default may start a scan, and mid-scan the active
+# network can briefly be missing from the list.
+current_ssid() {
+  nmcli -t -e no -f ACTIVE,SSID dev wifi list --rescan no 2>/dev/null | sed -n 's/^yes://p' | head -1
+}
+
+mode=auto
+[[ -r $OVERRIDE_FILE ]] && mode=$(<"$OVERRIDE_FILE")
+last=""
+[[ -r $LAST_RESULT ]] && last=$(<"$LAST_RESULT")
+ssid=$(current_ssid)
+trusted=false
+is_trusted "$ssid" && trusted=true
+
+# JSON string body: backslash first, then quote, then the control characters
+# an SSID can legally contain.
+esc() {
+  local s=${1//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  printf '%s' "$s"
+}
+
+# The trusted list as a JSON array, for the panel's "Trusted networks" section.
+trusted_json=""
+while IFS= read -r name; do
+  trusted_json+="${trusted_json:+,}\"$(esc "$name")\""
+done < <(trusted_ssids)
+trusted_json="[$trusted_json]"
+
+if [[ ! -d $SYS ]]; then
+  printf '{"up":false,"connected":false,"trusted":%s,"mode":"%s","last":"%s","ssid":"%s","rx":0,"tx":0,"trustedList":%s}\n' \
+    "$trusted" "$(esc "$mode")" "$(esc "$last")" "$(esc "$ssid")" "$trusted_json"
+  exit 0
+fi
+
+rx=$(<"$SYS/statistics/rx_bytes") 2>/dev/null || rx=0
+tx=$(<"$SYS/statistics/tx_bytes") 2>/dev/null || tx=0
+
+peer=""; age=-1; addr=""
+# `wg show` needs CAP_NET_ADMIN. Try unprivileged first, then the scoped
+# NOPASSWD rule in /etc/sudoers.d/99-wg-toggle; without either, peer and
+# handshake simply stay unknown and the panel falls back to byte counters.
+wgshow() {
+  wg show "$WG_IF" "$1" 2>/dev/null || sudo -n wg show "$WG_IF" "$1" 2>/dev/null
+}
+ts=$(wgshow latest-handshakes | awk 'NR==1{print $2+0}')
+[[ -n $ts && $ts -gt 0 ]] && age=$(($(date +%s) - ts))
+peer=$(wgshow endpoints | awk 'NR==1{print $2}')
+addr=$(ip -4 -brief addr show "$WG_IF" 2>/dev/null | awk '{print $3}')
+
+# Received bytes are the honest signal that the peer is answering: a tunnel
+# with a dead endpoint still comes up, claims routes, and transmits forever.
+connected=false
+((rx > 0)) && connected=true
+
+printf '{"up":true,"connected":%s,"trusted":%s,"mode":"%s","peer":"%s","handshakeAge":%d,"rx":%d,"tx":%d,"address":"%s","last":"%s","ssid":"%s","trustedList":%s}\n' \
+  "$connected" "$trusted" "$(esc "$mode")" "$(esc "$peer")" "$age" "$rx" "$tx" "$(esc "$addr")" "$(esc "$last")" "$(esc "$ssid")" "$trusted_json"

@@ -1,0 +1,16 @@
+# Wi-Fi networks where the WireGuard tunnel stays DOWN.
+# Installed to /etc/wg-ssid/trusted (root:root 0644); edit with
+#   sudoedit /etc/wg-ssid/trusted
+#
+# One SSID per line, matched exactly (case-sensitive). Blank lines and lines
+# starting with # are ignored, and surrounding whitespace is trimmed.
+#
+# Every Wi-Fi network NOT listed here raises the tunnel. List at least the
+# network your VPN server sits on: connecting to it from inside asks the router
+# to hairpin its own public address, which most home routers cannot do.
+#
+# The dispatcher, wg-toggle and the bar widget all read this one file.
+#
+# Example:
+#   Home Wi-Fi
+#   Home Wi-Fi 5G

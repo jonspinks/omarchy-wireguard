@@ -1,0 +1,165 @@
+#!/bin/bash
+# Manual WireGuard override, callable from the bar widget.
+#
+#   wg-toggle toggle   flip forced-on <-> forced-off
+#   wg-toggle on|off   force a state, ignoring which Wi-Fi network we are on
+#   wg-toggle auto     hand control back to the SSID policy and re-evaluate
+#   wg-toggle trust     add the Wi-Fi network you are on NOW to the list
+#   wg-toggle untrust   remove one network, named on the first line of stdin
+#
+# Reached from the bar through a NOPASSWD sudoers rule, so input is tightly
+# bounded. `trust` takes no name at all: it can only add the network the machine
+# is connected to, so nothing can quietly trust an arbitrary network. `untrust`
+# reads its one name from stdin rather than argv, so the sudoers rule can name
+# every verb exactly, with no wildcard. It can only delete an exact existing
+# entry -- the worst a misuse can do is make the tunnel come up MORE often.
+# Install to /usr/local/bin/wg-toggle, mode 0755, root-owned.
+
+set -u
+
+WG_IF=wg0
+APPLY=/usr/local/bin/wg-ssid-apply
+OVERRIDE_FILE=/var/lib/wg-ssid/override
+TRUSTED_FILE=/etc/wg-ssid/trusted
+
+# Wi-Fi networks where the tunnel stays down: one SSID per line, written by
+# install.sh and by `wg-toggle trust|untrust` from the bar panel. No
+# file, or no names in it, means no network is trusted and the tunnel comes up
+# on every Wi-Fi network. Lines are trimmed and CRLF-safe so a stray space or a
+# file edited on Windows cannot silently untrust a network.
+# Keep this block identical in the dispatcher, wg-toggle and wireguard-stats.
+trusted_ssids() {
+  local line
+  [[ -r $TRUSTED_FILE ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [[ -z $line || $line == \#* ]] && continue
+    printf '%s\n' "$line"
+  done <"$TRUSTED_FILE"
+}
+
+is_trusted() {
+  local ssid=$1 line
+  [[ -n $ssid ]] || return 1
+  while IFS= read -r line; do
+    [[ $ssid == "$line" ]] && return 0
+  done < <(trusted_ssids)
+  return 1
+}
+
+# The SSID of the active Wi-Fi connection, empty when not on Wi-Fi. `-e no`
+# stops nmcli escaping ':' and '\' in the name, so an SSID containing either
+# still matches the list; only the first ':' separates the fields. `--rescan no`
+# reads the cached scan: the default may start a scan, and mid-scan the active
+# network can briefly be missing from the list.
+current_ssid() {
+  nmcli -t -e no -f ACTIVE,SSID dev wifi list --rescan no 2>/dev/null | sed -n 's/^yes://p' | head -1
+}
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+
+mkdir -p "$(dirname "$OVERRIDE_FILE")" 2>/dev/null
+
+current_override() { [[ -r $OVERRIDE_FILE ]] && cat "$OVERRIDE_FILE" || echo auto; }
+tunnel_is_up() { ip link show "$WG_IF" &>/dev/null; }
+
+# What the SSID policy would choose on its own, used when returning to auto.
+policy_wants() {
+  local ssid want=down
+  ssid=$(current_ssid)
+  if [[ -n $ssid ]] && ! is_trusted "$ssid"; then
+    want=up
+  fi
+  echo "$want"
+}
+
+# Rewrite the list under a lock, via a temp file in the same directory so the
+# swap is atomic: the dispatcher and the bar may read it at any moment.
+edit_trusted() { # add|remove <ssid>
+  local op=$1 ssid=$2 dir tmp line trimmed done=0
+  dir=$(dirname "$TRUSTED_FILE")
+  install -d -o root -g root -m 0755 "$dir"
+  exec 9>"$dir/.lock"
+  flock 9
+  tmp=$(mktemp "$dir/.trusted.XXXXXX")
+  if [[ -r $TRUSTED_FILE ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+      trimmed=${line%$'\r'}
+      trimmed=${trimmed#"${trimmed%%[![:space:]]*}"}
+      trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
+      # Comments and blank lines are kept as the user wrote them.
+      if [[ $op == remove && $trimmed == "$ssid" ]]; then done=1; continue; fi
+      printf '%s\n' "$line"
+    done <"$TRUSTED_FILE" >"$tmp"
+  else
+    printf '# Wi-Fi networks where the WireGuard tunnel stays down. One SSID per line.\n' >"$tmp"
+  fi
+  [[ $op == add ]] && printf '%s\n' "$ssid" >>"$tmp" && done=1
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$TRUSTED_FILE"
+  ((done))
+}
+
+# Re-run the policy after the list changes -- but only in automatic mode; a
+# forced on/off is the user's explicit choice and the list must not undo it.
+reapply() {
+  [[ $(current_override) == auto ]] || exit 0
+  exec "$APPLY" "$(policy_wants)"
+}
+
+case "${1:-toggle}" in
+trust)
+  (($# == 1)) || { echo "usage: wg-toggle trust  (takes no name)" >&2; exit 1; }
+  ssid=$(current_ssid)
+  [[ -n $ssid ]] || { echo "not connected to a Wi-Fi network" >&2; exit 1; }
+  # The list format cannot hold these: a leading '#' reads as a comment and
+  # surrounding whitespace is trimmed. Refuse rather than store something that
+  # would never match.
+  if [[ $ssid == \#* || $ssid != "${ssid#[[:space:]]}" || $ssid != "${ssid%[[:space:]]}" ]]; then
+    echo "cannot trust \"$ssid\": names starting with # or with surrounding spaces cannot be listed" >&2
+    exit 1
+  fi
+  is_trusted "$ssid" || edit_trusted add "$ssid"
+  reapply
+  ;;
+untrust)
+  (($# == 1)) || { echo "usage: wg-toggle untrust  (the name goes on stdin)" >&2; exit 1; }
+  # One line, read with a timeout so a caller that never writes cannot leave a
+  # root process waiting. An SSID is at most 32 bytes; anything longer cannot be
+  # a network name, so it is refused before it reaches the list.
+  IFS= read -r -t 5 ssid || [[ -n ${ssid:-} ]] || { echo "untrust: no name on stdin" >&2; exit 1; }
+  ssid=${ssid%$'\r'}
+  [[ -n $ssid ]] && (($(LC_ALL=C; echo ${#ssid}) <= 32)) ||
+    { echo "untrust: not a Wi-Fi network name" >&2; exit 1; }
+  is_trusted "$ssid" || { echo "\"$ssid\" is not in the trusted list" >&2; exit 1; }
+  edit_trusted remove "$ssid"
+  reapply
+  ;;
+esac
+
+(($# <= 1)) || { echo "usage: wg-toggle [toggle|on|off|auto|trust|untrust]" >&2; exit 1; }
+
+case "${1:-toggle}" in
+toggle)
+  # Base the flip on what is actually running, not on the stored override --
+  # otherwise the first click after an automatic change goes the wrong way.
+  if tunnel_is_up; then new=off; else new=on; fi
+  ;;
+on) new=on ;;
+off) new=off ;;
+auto) new=auto ;;
+*)
+  echo "usage: wg-toggle [toggle|on|off|auto|trust|untrust]" >&2
+  exit 1
+  ;;
+esac
+
+printf '%s\n' "$new" > "$OVERRIDE_FILE"
+
+case "$new" in
+on) exec "$APPLY" up ;;
+off) exec "$APPLY" down ;;
+auto) exec "$APPLY" "$(policy_wants)" ;;
+esac

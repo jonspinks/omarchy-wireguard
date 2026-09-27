@@ -93,8 +93,8 @@ Panel {
     runToggle(tunnelUp ? "on" : "off")
   }
 
-  // `extra` is only ever the one name `untrust` takes; sudoers grants the other
-  // verbs with no arguments at all.
+  // `extra` is only ever the one name `untrust` takes. It goes to wg-toggle on
+  // stdin, not argv, so the sudoers rule can list every verb exactly.
   function runToggle(action, extra) {
     if (busy) return
     // Keyboard and IPC reach this too, not just the switch.
@@ -102,9 +102,8 @@ Panel {
     if (action === "trust" && !root.canTrustHere) return
     busy = true
     actionError = ""
-    var cmd = ["sudo", "-n", "/usr/local/bin/wg-toggle", action]
-    if (extra !== undefined) cmd.push(String(extra))
-    toggleProc.command = cmd
+    toggleProc.input = extra !== undefined ? String(extra) : ""
+    toggleProc.command = ["sudo", "-n", "/usr/local/bin/wg-toggle", action]
     toggleProc.running = true
   }
 
@@ -113,7 +112,9 @@ Panel {
 
   Process {
     id: statsProc
-    command: ["bash", "-lc", "~/.config/omarchy/bar/scripts/wireguard-stats"]
+    // Run from the plugin itself, as a fixed argv: `omarchy plugin update` then
+    // updates the helper along with the panel, and no shell parses the path.
+    command: [Quickshell.env("HOME") + "/.config/omarchy/plugins/blacksheep.wireguard/scripts/wireguard-stats"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -129,6 +130,13 @@ Panel {
 
   Process {
     id: toggleProc
+    // The one line `untrust` reads on stdin; empty for every other verb.
+    property string input: ""
+    stdinEnabled: true
+    onStarted: {
+      write(input + "\n")
+      input = ""
+    }
     // wg-toggle waits on a handshake before returning, so give the tunnel a
     // moment to settle before believing the next sample.
     stderr: StdioCollector { id: toggleErr; waitForEnd: true }
@@ -138,7 +146,7 @@ Panel {
         var msg = String(toggleErr.text || "").trim().split("\n").pop()
         // sudo -n says this when no NOPASSWD rule covers the verb.
         if (msg.indexOf("password is required") !== -1)
-          msg = "Not permitted. Re-run network/install.sh to update the sudoers rule."
+          msg = "Not permitted. Re-run install.sh in the plugin folder to update the sudoers rule."
         root.actionError = msg || ("wg-toggle failed (exit " + exitCode + ")")
       }
       settleTimer.restart()

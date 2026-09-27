@@ -1,0 +1,15 @@
+# Let the Omarchy bar's WireGuard widget toggle the tunnel and read its status
+# without a password. Every command is listed with its exact arguments, so the
+# grant cannot be reused for anything else. There are no wildcards: `untrust`
+# reads the network name from stdin, not argv. `wg show` never prints the
+# private key.
+#
+# install.sh replaces @USER@ with the account that runs it and validates the
+# result with `visudo -c` before installing it.
+#
+# Named 99- so it sorts last in /etc/sudoers.d: sudo applies the LAST matching
+# rule, so a blanket "%wheel ALL=(ALL:ALL) ALL" in a later-sorting file would
+# otherwise re-impose the password prompt this grant exists to avoid.
+@USER@ ALL=(root) NOPASSWD: /usr/local/bin/wg-toggle toggle, /usr/local/bin/wg-toggle on, /usr/local/bin/wg-toggle off, /usr/local/bin/wg-toggle auto
+@USER@ ALL=(root) NOPASSWD: /usr/local/bin/wg-toggle trust, /usr/local/bin/wg-toggle untrust
+@USER@ ALL=(root) NOPASSWD: /usr/bin/wg show wg0 latest-handshakes, /usr/bin/wg show wg0 endpoints, /usr/bin/wg show wg0 transfer

@@ -2,3 +2,8 @@
 *.bak.*
 *.orig
 *.rej
+
+# Never commit secrets, even by accident
+wg0.conf
+nextdns.conf
+*.key

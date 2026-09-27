@@ -1,0 +1,16 @@
+# The shape of /etc/wireguard/wg0.conf. Fill it in from your WireGuard server
+# (a router's VPN page usually exports exactly this), then install it with:
+#   sudo install -o root -g root -m 0600 wg0.conf /etc/wireguard/wg0.conf
+# It holds your private key: never commit it, and never copy one machine's file
+# to another. Give each machine its own keypair and its own peer on the server.
+
+[Interface]
+PrivateKey = <THIS-MACHINE'S-PRIVATE-KEY>
+Address = 10.8.0.2/32
+
+[Peer]
+PublicKey = <THE-SERVER'S-PUBLIC-KEY>
+# PresharedKey = <OPTIONAL-PRESHARED-KEY>
+AllowedIPs = 0.0.0.0/0, ::/0
+Endpoint = vpn.example.com:51820
+PersistentKeepalive = 25

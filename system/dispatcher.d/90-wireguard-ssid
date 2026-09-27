@@ -1,0 +1,80 @@
+#!/bin/bash
+# NetworkManager dispatcher: hold the WireGuard tunnel up on untrusted Wi-Fi.
+#
+# Trusted SSIDs run bare -- the VPN endpoint lives on one of those networks, so
+# tunnelling there would ask the router to hairpin its own WAN address and the
+# handshake would never land. Anything else on Wi-Fi gets the tunnel. Not on
+# Wi-Fi at all (ethernet, or no link) counts as "no tunnel".
+#
+# Install: sudo install -o root -g root -m 0755 \
+#            90-wireguard-ssid /etc/NetworkManager/dispatcher.d/
+
+IFACE="$1"
+ACTION="$2"
+
+WG_IF=wg0
+APPLY=/usr/local/bin/wg-ssid-apply
+TRUSTED_FILE=/etc/wg-ssid/trusted
+
+# Wi-Fi networks where the tunnel stays down: one SSID per line, written by
+# install.sh and by `wg-toggle trust|untrust` from the bar panel. No
+# file, or no names in it, means no network is trusted and the tunnel comes up
+# on every Wi-Fi network. Lines are trimmed and CRLF-safe so a stray space or a
+# file edited on Windows cannot silently untrust a network.
+# Keep this block identical in the dispatcher, wg-toggle and wireguard-stats.
+trusted_ssids() {
+  local line
+  [[ -r $TRUSTED_FILE ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    line=${line#"${line%%[![:space:]]*}"}
+    line=${line%"${line##*[![:space:]]}"}
+    [[ -z $line || $line == \#* ]] && continue
+    printf '%s\n' "$line"
+  done <"$TRUSTED_FILE"
+}
+
+is_trusted() {
+  local ssid=$1 line
+  [[ -n $ssid ]] || return 1
+  while IFS= read -r line; do
+    [[ $ssid == "$line" ]] && return 0
+  done < <(trusted_ssids)
+  return 1
+}
+
+# The SSID of the active Wi-Fi connection, empty when not on Wi-Fi. `-e no`
+# stops nmcli escaping ':' and '\' in the name, so an SSID containing either
+# still matches the list; only the first ':' separates the fields. `--rescan no`
+# reads the cached scan: the default may start a scan, and mid-scan the active
+# network can briefly be missing from the list.
+current_ssid() {
+  nmcli -t -e no -f ACTIVE,SSID dev wifi list --rescan no 2>/dev/null | sed -n 's/^yes://p' | head -1
+}
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+
+# Bringing the tunnel up fires this same script for the wg interface. Without
+# this guard that second run re-evaluates and can flap the link.
+[[ $IFACE == "$WG_IF" ]] && exit 0
+
+case "$ACTION" in
+up | down | connectivity-change) ;;
+*) exit 0 ;;
+esac
+
+ssid=$(current_ssid)
+
+want=down
+if [[ -n $ssid ]] && ! is_trusted "$ssid"; then
+  want=up
+fi
+
+# Hand off to a transient unit: the apply script waits up to 10s on a handshake,
+# and a dispatcher script that blocks that long stalls NetworkManager's queue
+# for every other event.
+systemd-run --no-block --unit="wg-ssid-apply-$$" --description="Apply WireGuard SSID policy" \
+  "$APPLY" "$want" >/dev/null 2>&1
+
+# Never fail: a non-zero exit here just spams the NetworkManager journal.
+exit 0
