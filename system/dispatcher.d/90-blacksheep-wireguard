@@ -24,7 +24,7 @@ TRUSTED_FILE=/etc/blacksheep.wireguard/trusted
 # Keep this block identical in the dispatcher, wg-toggle and wireguard-stats.
 trusted_ssids() {
   local line
-  [[ -r $TRUSTED_FILE ]] || return 0
+  [[ -f $TRUSTED_FILE && -r $TRUSTED_FILE ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
     line=${line#"${line%%[![:space:]]*}"}

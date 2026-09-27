@@ -30,7 +30,7 @@ TRUSTED_FILE=/etc/blacksheep.wireguard/trusted
 # Keep this block identical in the dispatcher, wg-toggle and wireguard-stats.
 trusted_ssids() {
   local line
-  [[ -r $TRUSTED_FILE ]] || return 0
+  [[ -f $TRUSTED_FILE && -r $TRUSTED_FILE ]] || return 0
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
     line=${line#"${line%%[![:space:]]*}"}
@@ -81,6 +81,12 @@ edit_trusted() { # add|remove <ssid>
   local op=$1 ssid=$2 dir tmp line trimmed done=0
   dir=$(dirname "$TRUSTED_FILE")
   install -d -o root -g root -m 0755 "$dir"
+  # Only ever a regular file of our own: never read through, or replace, a
+  # symlink or a directory that has appeared at the list's path.
+  if [[ -L $TRUSTED_FILE ]] || { [[ -e $TRUSTED_FILE ]] && [[ ! -f $TRUSTED_FILE ]]; }; then
+    echo "$TRUSTED_FILE is not a regular file; not editing it" >&2
+    return 1
+  fi
   exec 9>"$dir/.lock"
   flock 9
   tmp=$(mktemp "$dir/.trusted.XXXXXX")
@@ -98,7 +104,9 @@ edit_trusted() { # add|remove <ssid>
   fi
   [[ $op == add ]] && printf '%s\n' "$ssid" >>"$tmp" && done=1
   chmod 0644 "$tmp"
-  mv -f "$tmp" "$TRUSTED_FILE"
+  # -T: always a rename onto the path itself, never a move into it if the
+  # path has somehow become a directory.
+  mv -f -T "$tmp" "$TRUSTED_FILE" || { rm -f "$tmp"; return 1; }
   ((done))
 }
 
@@ -121,7 +129,7 @@ trust)
     echo "cannot trust \"$ssid\": names starting with # or with surrounding spaces cannot be listed" >&2
     exit 1
   fi
-  is_trusted "$ssid" || edit_trusted add "$ssid"
+  is_trusted "$ssid" || edit_trusted add "$ssid" || exit 1
   reapply
   ;;
 untrust)
@@ -134,7 +142,7 @@ untrust)
   [[ -n $ssid ]] && (($(LC_ALL=C; echo ${#ssid}) <= 32)) ||
     { echo "untrust: not a Wi-Fi network name" >&2; exit 1; }
   is_trusted "$ssid" || { echo "\"$ssid\" is not in the trusted list" >&2; exit 1; }
-  edit_trusted remove "$ssid"
+  edit_trusted remove "$ssid" || exit 1
   reapply
   ;;
 esac
