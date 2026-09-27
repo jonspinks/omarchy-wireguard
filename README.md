@@ -1,13 +1,47 @@
 # WireGuard — an Omarchy bar widget
 
-Tunnel state in the bar, and a panel with live throughput, handshake age, peer
-endpoint, a connect/disconnect switch, and the list of trusted Wi-Fi networks
-where the tunnel stays down. On every other Wi-Fi network the tunnel comes up
-by itself.
+Your VPN, on when you leave home. WireGuard in the bar that knows which Wi-Fi
+you trust, and does the right thing on its own.
 
-Follows the Wi-Fi widget convention: always visible, monochrome, and the same
-shield glyph struck through when the tunnel is not carrying traffic. Colour is
-reserved for a genuine fault.
+![WireGuard: connected by itself on café Wi-Fi, and off at home where the network is trusted](preview.png)
+
+## What you get
+
+A VPN you have to remember to turn on is a VPN that's off when it matters.
+This one follows your Wi-Fi instead. Tell it once which networks you trust,
+like home or the office, and it takes care of the rest.
+
+**It turns itself on.** Join a café, airport or hotel network and the tunnel
+comes up by itself. The icon in the bar tells you it's connected, and the
+panel shows the live speed, the last handshake and where you're connected to.
+
+![The icon in the bar: connected, and off at home](screenshots/1-the-icon.png)
+
+![Connected by itself on café Wi-Fi, with live traffic and the trusted list](screenshots/2-away.png)
+
+**And off when you're home.** On a network you trust it stays down, and the
+panel says why. That matters, because tunnelling home from inside your own
+network is exactly what most home routers can't do.
+
+![At home: the tunnel is off because Home is trusted](screenshots/3-home.png)
+
+**Trust a network in one click.** Your trusted networks are listed right in
+the panel. **Trust <network>** adds the one you're on, and ⊗ removes one.
+
+**You can always override it.** Flip the switch to force it on or off, or turn
+off *Automatically connect* to take manual control. Either way, it never fights
+you.
+
+![Forced off on an airport network, with one click to trust it](screenshots/4-manual.png)
+
+**It never leaves you without internet.** If the tunnel comes up but the other
+end never answers, it's torn back down after 10 seconds, instead of quietly
+swallowing all your traffic.
+
+**Honest about what it touches.** A small, readable installer sets up the
+parts that need root. It installs everything under this plugin's own names and
+records exactly what it installed, so uninstalling removes just that. The one
+file it never touches is your WireGuard key.
 
 Installs as the bar widget `blacksheep.wireguard`.
 

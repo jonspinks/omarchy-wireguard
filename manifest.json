@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Jon",
   "license": "MIT",
-  "description": "WireGuard tunnel status, live stats, and a connect/disconnect switch",
+  "description": "Your VPN, on when you leave home: WireGuard that connects itself on Wi-Fi you don't trust and stays off on the ones you do.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "WireGuard",
-    "description": "Tunnel state, throughput, handshake age, and manual connect/disconnect.",
+    "description": "Tunnel status, live speed and a switch, plus the Wi-Fi networks you trust. Connects by itself everywhere else, and never leaves you offline.",
     "category": "Network",
     "allowMultiple": false,
     "defaultSection": "right"
