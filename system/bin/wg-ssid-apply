@@ -17,13 +17,38 @@ STATE_DIR=/run/blacksheep.wireguard                    # ephemeral: last outcome
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 
-mkdir -p "$STATE_DIR" "$(dirname "$OVERRIDE_FILE")" 2>/dev/null
+# Our own directories and files. A directory must be a real one owned by this
+# account (root, when installed), never a link. The lock is opened without
+# truncation (<>, not >) and never through a link. State files are written
+# through a fresh mktemp file beside them, then renamed over the name: nothing
+# planted at a predictable path is followed, truncated or waited on.
+own_dir() { # dir
+  install -d -m 0755 "$1" 2>/dev/null
+  [[ -d $1 && ! -L $1 && $(stat -c %u "$1") == "$(id -u)" ]]
+}
+open_lock() { # path: onto fd 9
+  if [[ -L $1 ]] || { [[ -e $1 ]] && [[ ! -f $1 ]]; }; then return 1; fi
+  exec 9<>"$1"
+}
+put() { # path line
+  local tmp
+  if [[ -L $1 ]] || { [[ -e $1 ]] && [[ ! -f $1 ]]; }; then return 1; fi
+  tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
+  if printf '%s\n' "$2" >"$tmp" && chmod 0644 "$tmp" && mv -f -T "$tmp" "$1"; then return 0; fi
+  rm -f "$tmp"
+  return 1
+}
+
+own_dir "$STATE_DIR" && own_dir "$(dirname "$OVERRIDE_FILE")" || {
+  logger -t blacksheep-wireguard "state directories are not ours; not applying"
+  exit 0
+}
 
 # NetworkManager fires events in bursts (up, then a dhcp change). Without a lock
 # two wg-quick runs interleave and leave half-built state. The lock lives in our
 # own root-owned directory, not the world-writable /run/lock: a root process
 # must never open a path that another account could have created first.
-exec 9>"$STATE_DIR/apply.lock"
+open_lock "$STATE_DIR/apply.lock" || exit 0
 flock -w 30 9 || exit 0
 
 override=auto
@@ -36,7 +61,7 @@ on) WANT=up ;;
 off) WANT=down ;;
 esac
 
-note() { printf '%s %s\n' "$(date +%H:%M:%S)" "$1" > "$STATE_DIR/last-result"; }
+note() { put "$STATE_DIR/last-result" "$(date +%H:%M:%S) $1"; }
 tunnel_is_up() { ip link show "$WG_IF" &>/dev/null; }
 last_handshake() { wg show "$WG_IF" latest-handshakes 2>/dev/null | awk 'NR==1 {print $2+0; exit}'; }
 
@@ -46,7 +71,7 @@ last_handshake() { wg show "$WG_IF" latest-handshakes 2>/dev/null | awk 'NR==1 {
 # "off" from the panel -- the user's explicit choice -- downs any wg0.
 RAISED=$STATE_DIR/raised
 ifindex() { cat "/sys/class/net/$WG_IF/ifindex" 2>/dev/null; }
-mark_raised() { ifindex >"$RAISED"; }
+mark_raised() { put "$RAISED" "$(ifindex)"; }
 raised_by_us() { [[ -r $RAISED && -n $(ifindex) && $(<"$RAISED") == "$(ifindex)" ]]; }
 take_down() { wg-quick down "$WG_IF" 2>/dev/null; rm -f "$RAISED"; }
 

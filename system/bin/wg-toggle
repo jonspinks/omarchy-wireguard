@@ -60,7 +60,29 @@ current_ssid() {
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
 
-mkdir -p "$(dirname "$OVERRIDE_FILE")" 2>/dev/null
+# Our own directories and files. A directory must be a real one owned by this
+# account (root, when installed), never a link. The lock is opened without
+# truncation (<>, not >) and never through a link. State files are written
+# through a fresh mktemp file beside them, then renamed over the name: nothing
+# planted at a predictable path is followed, truncated or waited on.
+own_dir() { # dir
+  install -d -m 0755 "$1" 2>/dev/null
+  [[ -d $1 && ! -L $1 && $(stat -c %u "$1") == "$(id -u)" ]]
+}
+open_lock() { # path: onto fd 9
+  if [[ -L $1 ]] || { [[ -e $1 ]] && [[ ! -f $1 ]]; }; then return 1; fi
+  exec 9<>"$1"
+}
+put() { # path line
+  local tmp
+  if [[ -L $1 ]] || { [[ -e $1 ]] && [[ ! -f $1 ]]; }; then return 1; fi
+  tmp=$(mktemp "$(dirname "$1")/.$(basename "$1").XXXXXX") || return 1
+  if printf '%s\n' "$2" >"$tmp" && chmod 0644 "$tmp" && mv -f -T "$tmp" "$1"; then return 0; fi
+  rm -f "$tmp"
+  return 1
+}
+
+own_dir "$(dirname "$OVERRIDE_FILE")" || { echo "$(dirname "$OVERRIDE_FILE") is not ours" >&2; exit 1; }
 
 current_override() { [[ -r $OVERRIDE_FILE ]] && cat "$OVERRIDE_FILE" || echo auto; }
 tunnel_is_up() { ip link show "$WG_IF" &>/dev/null; }
@@ -87,7 +109,7 @@ edit_trusted() { # add|remove <ssid>
     echo "$TRUSTED_FILE is not a regular file; not editing it" >&2
     return 1
   fi
-  exec 9>"$dir/.lock"
+  open_lock "$dir/.lock" || { echo "$dir/.lock is not a regular file; not editing" >&2; return 1; }
   flock 9
   tmp=$(mktemp "$dir/.trusted.XXXXXX")
   if [[ -r $TRUSTED_FILE ]]; then
@@ -164,7 +186,7 @@ auto) new=auto ;;
   ;;
 esac
 
-printf '%s\n' "$new" > "$OVERRIDE_FILE"
+put "$OVERRIDE_FILE" "$new" || { echo "cannot write $OVERRIDE_FILE" >&2; exit 1; }
 
 case "$new" in
 on) exec "$APPLY" up ;;
